@@ -20,7 +20,7 @@ except ImportError as e:
 STEER_CHANNEL = 0        # サーボがつながっているPCA9685のチャンネル番号 (0-15)
 STEER_CENTER = 325       # ニュートラル（直進）のパルス値
 STEER_KP = 0.0           # 位置ズレ（offset）に対する比例ゲイン
-STEER_KC = 1800.0         # 曲率（curvature / poly[0]）に対するゲイン（要調整）
+STEER_KC = 3600.0         # 曲率（curvature / poly[0]）に対するゲイン（要調整）
 
 # ステアリングの物理的限界
 STEER_MIN_PULSE = 150    # 左限界値 (1.0ms 相当)
@@ -83,8 +83,8 @@ def calculate_steering_offset(frame):
     x_center_frame = w // 2
     
     # 1. ROI（解析領域）の設定
-    roi_top = int(h * 0.45)
-    roi_bottom = int(h * 0.90)
+    roi_top = int(h * 0.5)
+    roi_bottom = int(h * 0.99)
     roi = frame[roi_top:roi_bottom, :]
     
     proc_w = 320
@@ -98,19 +98,18 @@ def calculate_steering_offset(frame):
     sample_y_start = int(proc_h * 0.80)
     sample_x_start = int(proc_w * 0.35)
     sample_x_end = int(proc_w * 0.65)
-    
+
     ground_patch = hsv_roi[sample_y_start:proc_h, sample_x_start:sample_x_end]
     mean_h, mean_s, mean_v = cv2.mean(ground_patch)[:3]
     
-    # ★【判定を厳しく修正】グレー系・カラー系の許容幅を狭くして誤検知を防ぐ
-    if mean_s < 100:
-        lower_ground = np.array([0, 0, max(0, mean_v - 20)], dtype=np.uint8)
-        upper_ground = np.array([180, 25, min(255, mean_v + 20)], dtype=np.uint8)
-    else:
-        tol_h, tol_s, tol_v = 20, 20, 20
-        lower_ground = np.array([max(0, mean_h - tol_h), max(0, mean_s - tol_s), max(0, mean_v - tol_v)], dtype=np.uint8)
-        upper_ground = np.array([min(180, mean_h + tol_h), min(255, mean_s + tol_s), min(255, mean_v + tol_v)], dtype=np.uint8)
-    
+    # 明度(V)・彩度(S)の範囲調整
+    min_v_allowed = max(0, int(mean_v - 70))
+    max_v_allowed = min(220, int(mean_v + 50))  # 白い壁を除外するため上限を少し抑える
+    max_s_allowed = max(60, int(mean_s + 40))
+
+    lower_ground = np.array([0, 0, min_v_allowed], dtype=np.uint8)
+    upper_ground = np.array([180, max_s_allowed, max_v_allowed], dtype=np.uint8)
+
     mask_ground = cv2.inRange(hsv_roi, lower_ground, upper_ground)
     
     # ノイズ除去と穴埋め
@@ -123,9 +122,13 @@ def calculate_steering_offset(frame):
     x_pts_buf = np.empty(max_rows, dtype=np.float32)
     valid_count = 0
     
+    # ★ 左右の境界（壁）座標保持用リスト
+    left_wall_pts = []
+    right_wall_pts = []
+
     min_road_width_px = 45
     max_x_jump_px = 25
-    consecutive_limit = 5
+    consecutive_limit = 15  # 奥まで追従できるよう上限を拡大
     missing_count = 0
     y_cutoff_real = roi_top
     
@@ -152,21 +155,30 @@ def calculate_steering_offset(frame):
                     best_cluster = []
 
             if len(best_cluster) >= min_road_width_px:
-                x_mean = np.mean(best_cluster)
-                
                 left_edge = best_cluster[0]
                 right_edge = best_cluster[-1]
-                wall_margin_thresh = 35 
+
+                # ★ 画面座標系に変換して左右の端点を保存
+                real_y = int(y / scale) + roi_top
+                real_left_x = int(left_edge / scale)
+                real_right_x = int(right_edge / scale)
+
+                left_wall_pts.append([real_left_x, real_y])
+                right_wall_pts.append([real_right_x, real_y])
+
+                x_mean = np.mean(best_cluster)
                 
+                # 壁反発処理
+                wall_margin_thresh = 60
                 if left_edge < wall_margin_thresh:
-                    x_mean += (wall_margin_thresh - left_edge) * 0.4
+                    x_mean += (wall_margin_thresh - left_edge) * 0.8
                 elif (proc_w - right_edge) < wall_margin_thresh:
-                    x_mean -= (wall_margin_thresh - (proc_w - right_edge)) * 0.4
+                    x_mean -= (wall_margin_thresh - (proc_w - right_edge)) * 0.8
 
                 last_x = x_mean
                 missing_count = 0
                 
-                y_pts_buf[valid_count] = int(y / scale) + roi_top
+                y_pts_buf[valid_count] = real_y
                 x_pts_buf[valid_count] = int(x_mean / scale)
                 valid_count += 1
             else:
@@ -180,7 +192,7 @@ def calculate_steering_offset(frame):
             
     output = frame.copy()
     
-    # --- サンプリング領域をデバッグ画面に可視化 ---
+    # サンプリング領域の描画
     dbg_sample_y1 = int(sample_y_start / scale) + roi_top
     dbg_sample_y2 = int(proc_h / scale) + roi_top
     dbg_sample_x1 = int(sample_x_start / scale)
@@ -189,10 +201,20 @@ def calculate_steering_offset(frame):
     cv2.putText(output, "Sampling Area", (dbg_sample_x1, dbg_sample_y1 - 10), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
 
+    # 緑色オーバーレイ表示
     mask_ground_full = cv2.resize(mask_ground, (w, roi_bottom - roi_top), interpolation=cv2.INTER_NEAREST)
     roi_sub = output[roi_top:roi_bottom, :]
     green_cond = mask_ground_full > 0
     roi_sub[green_cond] = (roi_sub[green_cond] * 0.7 + np.array([0, 255, 0], dtype=np.float32) * 0.3).astype(np.uint8)
+
+    # ★ 左右の境界（壁）を赤色の帯としてハイライト表示
+    if len(left_wall_pts) > 1:
+        pts_left = np.array(left_wall_pts, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(output, [pts_left], isClosed=False, color=(0, 0, 255), thickness=6)
+
+    if len(right_wall_pts) > 1:
+        pts_right = np.array(right_wall_pts, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(output, [pts_right], isClosed=False, color=(0, 0, 255), thickness=6)
 
     # 4. LPF + 重み付き2次関数フィッティング
     if valid_count >= 5:
@@ -205,16 +227,15 @@ def calculate_steering_offset(frame):
         y_norm = (y_pts - y_cutoff_real) / max(1, (roi_bottom - y_cutoff_real))
         final_weights = ((y_norm ** 2) + 0.05) * stability_weights
         
-        # 一番下の中央＆接線垂直固定アンカー
+        # アンカーポイントの設定
         anchor_y = np.array([roi_bottom, roi_bottom - 4, roi_bottom - 8], dtype=np.float32)
         anchor_x = np.array([x_center_frame, x_center_frame, x_center_frame], dtype=np.float32)
-        anchor_weights = np.array([200.0, 100.0, 50.0], dtype=np.float32) # 警告防止のためウェイト調整
+        anchor_weights = np.array([200.0, 100.0, 50.0], dtype=np.float32)
         
         y_pts_fixed = np.concatenate([y_pts, anchor_y])
         x_lpf_fixed = np.concatenate([x_lpf, anchor_x])
         final_weights_fixed = np.concatenate([final_weights, anchor_weights])
         
-        # 警告を防ぐためにスケーリングを整えてフィッティング
         poly = np.polyfit(y_pts_fixed - roi_bottom, x_lpf_fixed, 2, w=final_weights_fixed)
         
         plot_y = np.linspace(roi_bottom, y_cutoff_real, 30)
@@ -223,16 +244,25 @@ def calculate_steering_offset(frame):
         curve_pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
         cv2.polylines(output, [curve_pts], isClosed=False, color=(0, 255, 255), thickness=4)
         
-        target_x_bot = int(np.polyval(poly, 0)) # roi_bottom - roi_bottom = 0
+        target_x_bot = int(np.polyval(poly, 0))
         offset = target_x_bot - x_center_frame
         cv2.circle(output, (target_x_bot, roi_bottom - 10), 8, (0, 255, 255), -1)
         
         curvature = poly[0]
         slope = poly[1]
     else:
+        # ★ 点数が不足している場合は画面中央に真っ直ぐの直線を描画
         offset = 0
         curvature = 0.0
         slope = 0.0
+
+        straight_pts = np.array([
+            [x_center_frame, roi_bottom],
+            [x_center_frame, roi_top]
+        ], dtype=np.int32)
+
+        cv2.polylines(output, [straight_pts], isClosed=False, color=(0, 255, 255), thickness=4)
+        cv2.circle(output, (x_center_frame, roi_bottom - 10), 8, (0, 255, 255), -1)
 
     cv2.line(output, (x_center_frame, roi_top), (x_center_frame, roi_bottom), (255, 0, 0), 1)
     return output, offset, curvature, slope
