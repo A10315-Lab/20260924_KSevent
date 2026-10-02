@@ -26,15 +26,24 @@ WHITE_V_MIN = 170
 GROUND_H_TOL = 90
 GROUND_S_TOL = 40
 GROUND_V_TOL = 70
+WHITE_V_MIN = 170
+GROUND_H_TOL = 90
+GROUND_S_TOL = 40
+GROUND_V_TOL = 60
 
 STEER_CHANNEL = 0
 STEER_CENTER = 325
 
 # 制御ゲイン
+STEER_KP = 0.0             # 重心オフセットPゲイン (px -> pulse)
 STEER_KP = 0.8             # 重心オフセットPゲイン (px -> pulse)
+# STEER_KP = 0.8             # 重心オフセットPゲイン (px -> pulse)
 # STEER_KC = 3600.0          # 曲率ゲイン (curvature -> pulse)
-STEER_KC = 5400.0          # 曲率ゲイン (curvature -> pulse)
+# STEER_KC = 5400.0          # 曲率ゲイン (curvature -> pulse)
+STEER_KC = 100000.0          # 曲率ゲイン (curvature -> pulse)
+WALL_REPULSION_GAIN = 0.0   # ★ 壁からの反発力ゲインを強化 (1.5 -> 3.0)
 WALL_REPULSION_GAIN = 20.0   # ★ 壁からの反発力ゲインを強化 (1.5 -> 3.0)
+WALL_REPULSION_GAIN = 2.0   # ★ 壁からの反発力ゲインを強化 (1.5 -> 3.0)
 
 STEER_MIN_PULSE = 150
 STEER_MAX_PULSE = 450
